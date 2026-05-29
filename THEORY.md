@@ -88,7 +88,9 @@
 
 外側軸を実験室の床に対して垂直 (=床と直角に立てる) から、徐々に倒していくことを考えます。倒し具合を「傾斜角」と呼び、ψ (ギリシャ文字のプサイ) で表記します。
 
-![傾斜モードの幾何学](https://raw.githubusercontent.com/GYRAVEC/clinostat-calc/main/image/Gemini_Generated_Image_gpu3i4gpu3i4gpu3.png)
+![傾斜モードの幾何学: 傾斜角ψ=0°, 60°, 90° の3パネルで、外側軸の傾きと地球重力の関係を示す模式図](https://raw.githubusercontent.com/GYRAVEC/clinostat-calc/main/image/Gemini_Generated_Image_gpu3i4gpu3i4gpu3.png)
+
+*図1. 傾斜角 ψ を変えたときの外側軸 (グレーの棒) と地球重力 (黒矢印 g₀) の位置関係。左: ψ=0° で外側軸が鉛直、重力は軸と平行。中央: ψ=60° で重力を軸方向 (g₀·cos ψ) と直角方向 (g₀·sin ψ) に分解。右: ψ=90° で外側軸が水平、重力は軸と直角。サンプル (黒点) は常に2軸の交点に位置する。*
 
 地球重力は常に下を向いていますが、外側軸の向きが変わると、重力を「軸方向の成分」と「軸に直角な成分」に分けて考えたとき、それぞれの大きさが変わります。
 
