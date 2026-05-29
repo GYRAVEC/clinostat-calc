@@ -279,6 +279,104 @@ def compute_centrifuge(g_target: float,
     }
 
 
+# ---------------- Hybrid モード (任意のサンプル半径) -----------------
+
+def compute_hybrid(g_target: float,
+                   sample_r: float = 0.02,
+                   base_rpm: float = DEFAULT_BASE_RPM,
+                   drift_min: float = DEFAULT_DRIFT_MIN,
+                   chamber_r: float = R_CHAMBER_DEFAULT,
+                   culture_hours: float = 24.0) -> dict:
+    """サンプルが軸交点から r 離れた任意の位置にある場合のハイブリッド計算.
+
+    戦略: Tilt モードベース (ω_in 低速ドリフト) + 遠心寄与の補正
+    Body系での重力 2成分:
+      g_tilt        = g0 · cos ψ        (ゆっくりドリフト方向)
+      g_centrifugal = ω_in² × r          (body 固定方向)
+    これらは直交するので合成は二乗和:
+      |⟨g⟩| = √(g_tilt² + g_cent²) = g_target × g0
+    """
+    if g_target < 0 or g_target > G_MAX_TILT + 1e-9:
+        raise ValueError(f"g_target {g_target}g は [0, {G_MAX_TILT}] の範囲")
+    if sample_r < 0:
+        raise ValueError(f"sample_r {sample_r} は非負")
+
+    omega_out = base_rpm * 2 * math.pi / 60.0
+    T_drift = drift_min * 60.0
+    omega_in = 2 * math.pi / T_drift if T_drift > 0 else 0.0
+
+    # 🐱 サンプル位置での遠心寄与 (body-fixed)
+    g_cent_abs = omega_in ** 2 * sample_r            # [m/s²]
+    g_cent_norm = g_cent_abs / G_EARTH               # [g]
+
+    # 🐱 tilt 寄与を残りに割り当て (直交合成)
+    g_tilt_normsq = g_target ** 2 - g_cent_norm ** 2
+    if g_tilt_normsq < -1e-12:
+        raise ValueError(
+            f"遠心寄与 {g_cent_norm:.4e}g (= ω_in²·r/g0) > 目標 {g_target}g: "
+            f"sample_r ({sample_r*100:.2f}cm) を下げるか drift_min を増やす"
+        )
+    g_tilt_norm = math.sqrt(max(g_tilt_normsq, 0.0))
+    if g_tilt_norm > 1.0:
+        raise ValueError(f"必要な tilt 寄与 {g_tilt_norm}g > 1g: 物理的に不可")
+    psi_rad = math.acos(min(g_tilt_norm, 1.0))
+    psi_deg = math.degrees(psi_rad)
+
+    # 🐱 沈殿診断
+    # tilt 寄与: 閉軌道 (1ドリフト周期で正味ゼロ), 振幅 v_sed*g_tilt*T/π
+    drift_amp = V_SED_BACTERIA * g_tilt_norm * T_drift / math.pi      # m
+    # 遠心寄与: body-fixed で時間に比例して累積
+    v_cent = V_SED_BACTERIA * g_cent_norm                              # m/s
+    cent_disp_total = v_cent * culture_hours * 3600.0                  # m
+    total_disp = drift_amp + cent_disp_total
+    chamber_ratio = total_disp / chamber_r if chamber_r > 0 else float("inf")
+
+    warnings = []
+    if g_cent_norm > 0.05 * g_target and g_target > 1e-3:
+        warnings.append(
+            f"遠心寄与 {g_cent_norm:.4e}g (= ω_in²·r/g0) が目標の 5% 超: "
+            "sample_r を下げる or drift_min を増やす or centrifuge モードに切替"
+        )
+    if cent_disp_total > chamber_r:
+        warnings.append(
+            f"遠心由来累積変位 {cent_disp_total*1000:.2f}mm > チャンバ半径 {chamber_r*1000:.1f}mm: "
+            f"培養 {culture_hours}h 内に壁到達"
+        )
+    if T_drift < T_BIO_BACTERIA_S:
+        warnings.append(
+            f"T_drift ({drift_min:.1f}min) < T_bio (~{T_BIO_BACTERIA_S/60:.0f}min): "
+            "細胞は g_target を知覚できない可能性"
+        )
+    if sample_r == 0.0:
+        warnings.append("sample_r = 0 は tilt モードと等価. --mode tilt 推奨")
+
+    return {
+        "mode": "hybrid",
+        "g_target": g_target,
+        "g_effective": g_target,
+        "g_tilt_component": g_tilt_norm,
+        "g_centrifugal_component": g_cent_norm,
+        "sample_r_cm": sample_r * 100.0,
+        "psi_deg": psi_deg,
+        "psi_rad": psi_rad,
+        "base_rpm": base_rpm,
+        "drift_min": drift_min,
+        "chamber_r_mm": chamber_r * 1000.0,
+        "culture_hours": culture_hours,
+        "omega_out_rpm": omega_out * 60.0 / (2 * math.pi),
+        "omega_in_rpm": omega_in * 60.0 / (2 * math.pi),
+        "omega_out_rad_s": omega_out,
+        "omega_in_rad_s": omega_in,
+        "diagnostics": {
+            "tilt_drift_amp_mm": drift_amp * 1000.0,
+            "centrifugal_displacement_mm": cent_disp_total * 1000.0,
+            "total_displacement_mm": total_disp * 1000.0,
+            "chamber_safety_ratio": chamber_ratio,
+        },
+        "warnings": warnings,
+    }
+
+
 # ---------------- 表示系 -----------------
 
 ANSI = {
@@ -424,12 +522,52 @@ def render_centrifuge(r: dict, label: str = "", use_color: bool = True) -> None:
         print("  " + c("[!] " + w, "red", use_color=use_color))
 
 
+def render_hybrid(r: dict, label: str = "", use_color: bool = True) -> None:
+    head = f"目標重力: {r['g_target']:.4g} g  ({r['g_target'] * G_EARTH:.4f} m/s²)"
+    if label:
+        head = f"[{label}] " + head
+    print(c(head + "   [Hybrid モード]", "bold", "yellow", use_color=use_color))
+    print(f"  実効時間平均 : {r['g_effective']:.4f} g  "
+          f"(= √(g_tilt² + g_cent²))")
+    print(f"  サンプル位置 : 軸交点から r = {r['sample_r_cm']:.2f} cm")
+    print(f"  位相ドリフト周期: {r['drift_min']:.1f} min")
+    print(f"  内訳         : g_tilt = {r['g_tilt_component']:.4g} g  "
+          f"+ g_cent = {r['g_centrifugal_component']:.4e} g (直交合成)")
+
+    print(c("\n  [ハードウェア設定]", "bold", "blue", use_color=use_color))
+    psi_str = c(f"{r['psi_deg']:8.4f}°", "bold", use_color=use_color)
+    print(f"    外軸傾斜角 ψ : {psi_str}  ({r['psi_rad']:.6f} rad)  [鉛直から]")
+
+    print(c("\n  [回転設定]", "bold", "green", use_color=use_color))
+    out_str = c(f"{r['omega_out_rpm']:9.5f} RPM", "bold", use_color=use_color)
+    in_str = c(f"{r['omega_in_rpm']:9.5f} RPM", "bold", use_color=use_color)
+    print(f"    外側 ω_out : {out_str}  ({r['omega_out_rad_s']:.6f} rad/s)  [傾斜軸周り高速]")
+    print(f"    内側 ω_in  : {in_str}  ({r['omega_in_rad_s']:.6e} rad/s)  [方向ドリフト用低速]")
+
+    d = r["diagnostics"]
+    print(c(f"\n  [診断] 細菌想定 v_sed={V_SED_BACTERIA*1e6:.1f} μm/s, "
+            f"チャンバ半径 {r['chamber_r_mm']:.1f} mm, 培養時間 {r['culture_hours']:.0f} h",
+            "dim", use_color=use_color))
+    print(f"    tilt ドリフト振幅 (閉軌道, 振動)  : {d['tilt_drift_amp_mm']:.4f} mm")
+    print(f"    遠心由来累積変位 (body fixed, 蓄積): {d['centrifugal_displacement_mm']:.4f} mm")
+    print(f"    合計変位                          : {d['total_displacement_mm']:.4f} mm  "
+          f"({d['chamber_safety_ratio']*100:.2f}% of chamber)  "
+          + (c("[!] チャンバ越え", "red", use_color=use_color)
+             if d['chamber_safety_ratio'] > 1
+             else c("[OK]", "dim", use_color=use_color)))
+
+    for w in r["warnings"]:
+        print("  " + c("[!] " + w, "red", use_color=use_color))
+
+
 def render(result: dict, label: str = "", use_color: bool = True) -> None:
     mode = result["mode"]
     if mode == "tilt":
         render_tilt(result, label=label, use_color=use_color)
     elif mode == "centrifuge":
         render_centrifuge(result, label=label, use_color=use_color)
+    elif mode == "hybrid":
+        render_hybrid(result, label=label, use_color=use_color)
     else:
         render_switching(result, label=label, use_color=use_color)
 
@@ -446,6 +584,10 @@ def compute(g_target, mode, **kw):
         return compute_centrifuge(g_target, sample_r=kw["sample_r"],
                                   outer_rpm=kw["base_rpm"], chamber_r=kw["chamber_r"],
                                   culture_hours=kw["culture_hours"])
+    if mode == "hybrid":
+        return compute_hybrid(g_target, sample_r=kw["sample_r"],
+                              base_rpm=kw["base_rpm"], drift_min=kw["drift_min"],
+                              chamber_r=kw["chamber_r"], culture_hours=kw["culture_hours"])
     raise ValueError(f"unknown mode: {mode}")
 
 
@@ -505,12 +647,15 @@ def main(argv=None) -> int:
     )
     p.add_argument("gravity", nargs="?",
                    help="目標重力(g単位 or プリセット or 'X m/s2'). 省略時は対話モード.")
-    p.add_argument("--mode", choices=["tilt", "centrifuge", "switching", "all"], default="tilt",
+    p.add_argument("--mode",
+                   choices=["tilt", "centrifuge", "hybrid", "switching", "all"],
+                   default="tilt",
                    help="計算モード (既定: tilt). "
                         "tilt=サンプル=軸交点, 外軸傾斜で 0..1g 沈殿なし; "
                         "centrifuge=サンプル=4角 (r=8.5cm), 内側遠心で g_target、沈殿あり; "
+                        "hybrid=任意の sample_r で tilt+遠心の合成、小オフセットを許容; "
                         "switching=軸交点+1:1/黄金比切替で 0..0.5g 傾斜なし; "
-                        "all=3モード並べて表示")
+                        "all=全モード並べて表示")
     p.add_argument("--all", action="store_true", help="代表プリセットを一括表示")
     p.add_argument("--base-rpm", type=float, default=DEFAULT_BASE_RPM,
                    help=f"基準回転速度 [RPM] (既定: {DEFAULT_BASE_RPM}; "
@@ -523,8 +668,9 @@ def main(argv=None) -> int:
     p.add_argument("--chamber-mm", type=float, default=R_CHAMBER_DEFAULT * 1000,
                    help=f"チャンバ半径 [mm] (既定: {R_CHAMBER_DEFAULT*1000:.1f})")
     p.add_argument("--sample-r-cm", type=float, default=R_INNER_FRAME * 100,
-                   help=f"centrifuge モード: サンプル位置の内軸からの半径 [cm] "
-                        f"(既定: {R_INNER_FRAME*100:.1f} = 内側フレーム4角)")
+                   help=f"centrifuge/hybrid モード: サンプル位置の内軸からの半径 [cm] "
+                        f"(centrifuge 既定: {R_INNER_FRAME*100:.1f} = 4角, "
+                        f"hybrid では 0〜10 cm 程度を想定)")
     p.add_argument("--culture-hours", type=float, default=24.0,
                    help="centrifuge モードの沈降診断で使う培養時間 [h] (既定: 24)")
     p.add_argument("--no-color", action="store_true", help="ANSIカラー無効")
@@ -537,7 +683,7 @@ def main(argv=None) -> int:
 
     def emit(g, label=""):
         if args.mode == "all":
-            for m in ("tilt", "centrifuge", "switching"):
+            for m in ("tilt", "centrifuge", "hybrid", "switching"):
                 try:
                     render(compute(g, m, **kw), label=label, use_color=use_color)
                     print()

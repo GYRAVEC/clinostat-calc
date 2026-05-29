@@ -5,12 +5,13 @@
 
 実験目的に合わせて 3 つのモードを選べる。
 
-## 3つのモード早見表
+## 4つのモード早見表
 
 | モード | サンプル位置 | 重力源 | 沈殿 | 主な用途 |
 |--------|------------|--------|------|---------|
 | **tilt** (既定) | 2軸の交点 (r≈0) | 地球重力の射影 g₀·cos ψ | なし | 懸濁状態で培養したい |
 | **centrifuge** | 内側4角 (r=8.5cm) | 内側回転の遠心力 ω²r | あり (火星/月と同じ) | Mars/Moon analog 実験 |
+| **hybrid** | **任意の r** (例: 2cm) | tilt と遠心の直交合成 | 主になし (微小な累積あり) | サンプルが完全に中央でない場合 |
 | **switching** | 2軸の交点 (r≈0) | 1:1 同期と黄金比の時間配分 | なし | 傾斜不可で 0–0.5g |
 
 詳細な原理は [THEORY.md](THEORY.md) を参照。
@@ -52,6 +53,27 @@
 → 部分重力 + 沈殿の両方を再現。火星表面で起きる現象をそのまま地上で再現したい場合に使う。
 → 細胞は遠心方向に沈み、容器壁に集まる (これは原理的に避けられない。tilt モードと使い分け)。
 
+## Hybrid モード — サンプルが完全中央でない場合 (任意のオフセット)
+
+サンプルが軸交点から距離 r 離れている場合 (例: 2cm オフセット)。tilt モードベースで遠心寄与の補正を含める。
+
+サンプル本体系で見た合成重力は、tilt と遠心の **直交合成**:
+
+```
+|⟨g⟩| = √( (g0·cos ψ)² + (ω_in² × r)² ) = g_target × g0
+```
+
+低速 ω_in (ドリフト用) では遠心寄与が微小なので、実用上 tilt と区別がつかない:
+
+| サンプル半径 r | 遠心寄与 (g単位) | 48h培養での累積変位 | 評価 |
+|---------------|------------------|--------------------|------|
+| 0 cm | 0 | 0 | tilt と等価 |
+| 2 cm | 5.6 × 10⁻⁸ g | 0.01 μm | 無視可 |
+| 5 cm | 1.4 × 10⁻⁷ g | 0.02 μm | 無視可 |
+| 8.5 cm | 2.4 × 10⁻⁷ g | 0.04 μm | 無視可 |
+
+→ サンプル配置が中央からずれていても、tilt 相当の効果が出る。詳細は [THEORY.md §13](THEORY.md) を参照。
+
 ## Switching モード — 傾斜不可の運用向け (上限 0.5g)
 
 ```
@@ -88,10 +110,14 @@ python3 clinostat.py "3.72 m/s2"     # m/s² 単位
 python3 clinostat.py 0.378 --mode centrifuge
 python3 clinostat.py 0.378 --mode centrifuge --culture-hours 48
 
+# hybrid モード (任意のサンプル半径)
+python3 clinostat.py 0.378 --mode hybrid --sample-r-cm 2
+python3 clinostat.py 0.166 --mode hybrid --sample-r-cm 5 --culture-hours 48
+
 # switching モード (傾斜不可運用)
 python3 clinostat.py 0.166 --mode switching
 
-# 3モード並べて比較
+# 全モード並べて比較
 python3 clinostat.py 0.378 --mode all
 
 # 全プリセット一括
@@ -106,13 +132,13 @@ python3 clinostat.py --mode switching
 
 | フラグ              | 既定値    | 意味                                              |
 |---------------------|-----------|---------------------------------------------------|
-| `--mode`            | `tilt`    | `tilt` / `centrifuge` / `switching` / `all`       |
+| `--mode`            | `tilt`    | `tilt` / `centrifuge` / `hybrid` / `switching` / `all` |
 | `--base-rpm`        | 5.0       | 基準回転速度 [RPM]                                |
-| `--drift-min`       | 20.0      | 位相ドリフト周期 [min] (tilt/switching)           |
+| `--drift-min`       | 20.0      | 位相ドリフト周期 [min] (tilt/hybrid/switching)    |
 | `--cycle-min`       | 60.0      | switching モードの切替周期 [min]                  |
 | `--chamber-mm`      | 5.0       | チャンバ半径 [mm] (沈降診断用)                    |
-| `--sample-r-cm`     | 8.5       | centrifuge モード時のサンプル内軸からの半径 [cm]  |
-| `--culture-hours`   | 24        | centrifuge モードの沈降診断用の培養時間 [h]       |
+| `--sample-r-cm`     | 8.5       | centrifuge/hybrid モード時のサンプル内軸からの半径 [cm] |
+| `--culture-hours`   | 24        | centrifuge/hybrid モードの沈降診断用の培養時間 [h] |
 | `--no-color`        | -         | ANSI カラー無効化                                 |
 
 ### 対話モードのコマンド
@@ -135,6 +161,7 @@ python3 clinostat.py --mode switching
 |------------------------------------------------------------|-----------------|
 | 火星/月の表面環境を細胞に再現したい (Mars analog)              | centrifuge      |
 | 部分重力下で細胞を懸濁状態で観察したい                        | tilt           |
+| サンプルが軸交点から数 cm 離れている (中央配置できない)         | hybrid          |
 | g_target > 1.0g (過重力)                                    | centrifuge      |
 | g_target > 0.5g (傾斜可能な装置がある)                       | tilt           |
 | g_target > 0.5g (傾斜できない、過重力NG)                     | (該当なし、ハード見直し) |
