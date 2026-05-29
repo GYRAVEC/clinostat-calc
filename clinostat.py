@@ -3,15 +3,23 @@
 2軸クリノスタット 回転設定計算ツール
 
   ハードウェア: 内側フレーム r = 8.5 cm / 外側フレーム r = 14.5 cm
-  配置        : サンプルは 2軸の交点 (r→0) に置き、遠心力は使わない
 
-  Tilt モード (既定, 0 ≤ g_target ≤ 1g):
+  サンプル配置とモードの組み合わせは3通り:
+
+  Tilt モード (既定, サンプル=2軸交点 r≈0, 0 ≤ g_target ≤ 1g):
     外軸を鉛直から ψ = arccos(g_target) 傾け、ω_out 高速 + ω_in 低速で
     細胞は |g| = g0·cos ψ を短時間平均として知覚し、長時間平均で蓄積ゼロ.
+    懸濁状態を保ちたい培養に推奨.
 
-  Switching モード (--mode switching, 0 ≤ g_target ≤ 0.5g):
+  Centrifuge モード (--mode centrifuge, サンプル=4角 r=8.5cm, 0 ≤ g_target):
+    内側回転 ω_in² × r で遠心力を g_target として負荷.
+    外側はクリノローテーション (低速で地球重力を時間平均で消す).
+    遠心方向に沈殿が起きる (Mars/Moon の実環境と同じ).
+    Mars analog 実験など、沈殿が"再現すべき現象"の場合に使う.
+
+  Switching モード (--mode switching, サンプル=2軸交点 r≈0, 0 ≤ g_target ≤ 0.5g):
     傾斜なし運用. Mode A (1:1+位相ドリフト 0.5g) と Mode B (黄金比 0g) を
-    時間配分で混合する従来方式.
+    時間配分で混合する従来方式. 沈殿なしだが上限 0.5g.
 """
 
 import argparse
@@ -187,6 +195,90 @@ def compute_switching(g_target: float,
     }
 
 
+# ---------------- Centrifuge モード (サンプル=内側4角) -----------------
+
+def compute_centrifuge(g_target: float,
+                       sample_r: float = R_INNER_FRAME,
+                       outer_rpm: float = DEFAULT_BASE_RPM,
+                       chamber_r: float = R_CHAMBER_DEFAULT,
+                       culture_hours: float = 24.0) -> dict:
+    """サンプルを内軸から sample_r (既定 8.5 cm = 4角配置) に置き、
+    内側遠心力 ω_in² × sample_r で g_target を負荷する.
+    外側はクリノローテーション (低速) で地球重力を時間平均で消す.
+    沈殿は遠心方向に必ず発生する (Mars/Moon の実環境と同じ性質).
+    """
+    if g_target < 0:
+        raise ValueError("g_target は非負")
+    if sample_r <= 0:
+        raise ValueError(f"sample_r {sample_r} は正の値. r=0 の場合は tilt モード推奨")
+
+    # 🐱 内側遠心で g_target 負荷: ω_in² × sample_r = g_target × g0
+    omega_in = math.sqrt(g_target * G_EARTH / sample_r)
+    rpm_in = omega_in * 60.0 / (2 * math.pi)
+
+    # 🐱 外側は低速クリノローテーション (黄金比で非共鳴)
+    omega_out = outer_rpm * 2 * math.pi / 60.0
+
+    # 🐱 外側位置 (フレーム半径 R_OUTER_FRAME) での外乱遠心
+    a_outer_disturb = omega_out ** 2 * R_OUTER_FRAME
+    g_outer_disturb = a_outer_disturb / G_EARTH
+
+    # 🐱 沈降診断: チャンバ底到達時間 = R_ch / (v_sed × g_target)
+    sed_velocity = V_SED_BACTERIA * g_target            # [m/s]
+    if sed_velocity > 0:
+        t_reach_wall_s = chamber_r / sed_velocity
+        t_reach_wall_h = t_reach_wall_s / 3600.0
+    else:
+        t_reach_wall_s = float("inf")
+        t_reach_wall_h = float("inf")
+
+    # 🐱 培養時間中、何時間ぶん細胞が壁に張り付いているか
+    if t_reach_wall_h < culture_hours:
+        wall_dwell_h = culture_hours - t_reach_wall_h
+        wall_dwell_ratio = wall_dwell_h / culture_hours
+    else:
+        wall_dwell_h = 0.0
+        wall_dwell_ratio = 0.0
+
+    warnings = []
+    if g_outer_disturb > g_target * 0.1 and g_target > 1e-4:
+        warnings.append(
+            f"外側遠心外乱 {g_outer_disturb:.4f}g が目標の10%超: "
+            f"--outer-rpm を下げる"
+        )
+    if t_reach_wall_h < 1.0 and g_target > 1e-3:
+        warnings.append(
+            f"細胞は {t_reach_wall_h*60:.1f} 分で壁に到達: "
+            "短時間培養しかできない or 大きいチャンバが必要"
+        )
+    if g_target > 5.0:
+        warnings.append(
+            f"g_target {g_target:g} は ω_in = {rpm_in:.0f} RPM 必要、装置の機械的限界に注意"
+        )
+
+    return {
+        "mode": "centrifuge",
+        "g_target": g_target,
+        "g_effective": g_target,
+        "sample_r_cm": sample_r * 100.0,
+        "outer_rpm": outer_rpm,
+        "chamber_r_mm": chamber_r * 1000.0,
+        "culture_hours": culture_hours,
+        "omega_in_rpm": rpm_in,
+        "omega_in_rad_s": omega_in,
+        "omega_out_rpm": outer_rpm,
+        "omega_out_rad_s": omega_out,
+        "diagnostics": {
+            "outer_disturb_g": g_outer_disturb,
+            "sed_velocity_um_s": sed_velocity * 1e6,
+            "t_reach_wall_h": t_reach_wall_h,
+            "wall_dwell_h": wall_dwell_h,
+            "wall_dwell_ratio": wall_dwell_ratio,
+        },
+        "warnings": warnings,
+    }
+
+
 # ---------------- 表示系 -----------------
 
 ANSI = {
@@ -212,9 +304,10 @@ def print_header(use_color: bool = True) -> None:
     line = "=" * 72
     print(c(line, "cyan", use_color=use_color))
     print(c("  2軸クリノスタット 回転設定計算ツール", "bold", "cyan", use_color=use_color))
-    print(c(f"  内側 r = {R_INNER_FRAME*100:.1f} cm  /  外側 r = {R_OUTER_FRAME*100:.1f} cm  "
-            f"/  サンプル位置 = 2軸交点", "dim", use_color=use_color))
-    print(c(f"  g0 = {G_EARTH} m/s²  /  φ = {PHI:.6f}",
+    print(c(f"  内側フレーム r = {R_INNER_FRAME*100:.1f} cm  /  外側フレーム r = {R_OUTER_FRAME*100:.1f} cm",
+            "dim", use_color=use_color))
+    print(c(f"  g0 = {G_EARTH} m/s²  /  φ = {PHI:.6f}  /  "
+            "サンプル位置はモードにより異なる (tilt/switching=軸交点, centrifuge=4角)",
             "dim", use_color=use_color))
     print(c(line, "cyan", use_color=use_color))
 
@@ -285,9 +378,58 @@ def render_switching(r: dict, label: str = "", use_color: bool = True) -> None:
         print("  " + c("[!] " + w, "red", use_color=use_color))
 
 
+def render_centrifuge(r: dict, label: str = "", use_color: bool = True) -> None:
+    head = f"目標重力: {r['g_target']:.4g} g  ({r['g_target'] * G_EARTH:.4f} m/s²)"
+    if label:
+        head = f"[{label}] " + head
+    print(c(head + "   [Centrifuge モード]", "bold", "yellow", use_color=use_color))
+    print(f"  実効時間平均 : {r['g_effective']:.4f} g  (= ω_in² × r_sample / g0)")
+    print(f"  サンプル位置 : 内軸から r = {r['sample_r_cm']:.1f} cm (例: 内側フレーム4角)")
+
+    print(c("\n  [回転設定]", "bold", "green", use_color=use_color))
+    in_str = c(f"{r['omega_in_rpm']:9.4f} RPM", "bold", use_color=use_color)
+    out_str = c(f"{r['omega_out_rpm']:9.4f} RPM", "bold", use_color=use_color)
+    print(f"    内側 ω_in  : {in_str}  ({r['omega_in_rad_s']:.4f} rad/s)  [遠心力で g_target 負荷]")
+    print(f"    外側 ω_out : {out_str}  ({r['omega_out_rad_s']:.4f} rad/s)  [低速クリノローテーション]")
+
+    d = r["diagnostics"]
+    print(c(f"\n  [診断] 細菌想定 v_sed={V_SED_BACTERIA*1e6:.1f} μm/s, "
+            f"チャンバ半径 {r['chamber_r_mm']:.1f} mm, 培養時間 {r['culture_hours']:.0f} h",
+            "dim", use_color=use_color))
+    print(f"    外側位置 (r={R_OUTER_FRAME*100:.1f}cm) での遠心外乱: "
+          f"{d['outer_disturb_g']:.4f} g  "
+          + (c("[!] 大", "red", use_color=use_color) if d['outer_disturb_g'] > r['g_target']*0.1
+             else c("[OK]", "dim", use_color=use_color)))
+    print(f"    細胞沈降速度    : {d['sed_velocity_um_s']:.3f} μm/s "
+          f"(= v_sed × g_target)")
+
+    twr = d["t_reach_wall_h"]
+    if twr == float("inf"):
+        wall_str = "壁到達なし (g_target=0)"
+    elif twr < 1:
+        wall_str = f"{twr*60:.1f} 分後"
+    else:
+        wall_str = f"{twr:.2f} 時間後"
+    print(f"    細胞が壁に到達  : {wall_str}  "
+          + (c("[!] 速い", "red", use_color=use_color) if twr < 1
+             else c("", "dim", use_color=use_color)))
+
+    if d["wall_dwell_ratio"] > 0:
+        dwell = c(f"{d['wall_dwell_ratio']*100:.1f}%", "red" if d['wall_dwell_ratio'] > 0.5 else "yellow",
+                  use_color=use_color)
+        print(f"    培養時間中の壁滞在: {d['wall_dwell_h']:.2f} h ({dwell})  "
+              "← 火星/月でも同じ現象、Mars analog 実験では正常な挙動")
+
+    for w in r["warnings"]:
+        print("  " + c("[!] " + w, "red", use_color=use_color))
+
+
 def render(result: dict, label: str = "", use_color: bool = True) -> None:
-    if result["mode"] == "tilt":
+    mode = result["mode"]
+    if mode == "tilt":
         render_tilt(result, label=label, use_color=use_color)
+    elif mode == "centrifuge":
+        render_centrifuge(result, label=label, use_color=use_color)
     else:
         render_switching(result, label=label, use_color=use_color)
 
@@ -300,6 +442,10 @@ def compute(g_target, mode, **kw):
         return compute_switching(g_target, base_rpm=kw["base_rpm"],
                                  drift_min=kw["drift_min"], cycle_min=kw["cycle_min"],
                                  chamber_r=kw["chamber_r"])
+    if mode == "centrifuge":
+        return compute_centrifuge(g_target, sample_r=kw["sample_r"],
+                                  outer_rpm=kw["base_rpm"], chamber_r=kw["chamber_r"],
+                                  culture_hours=kw["culture_hours"])
     raise ValueError(f"unknown mode: {mode}")
 
 
@@ -359,43 +505,48 @@ def main(argv=None) -> int:
     )
     p.add_argument("gravity", nargs="?",
                    help="目標重力(g単位 or プリセット or 'X m/s2'). 省略時は対話モード.")
-    p.add_argument("--mode", choices=["tilt", "switching", "both"], default="tilt",
+    p.add_argument("--mode", choices=["tilt", "centrifuge", "switching", "all"], default="tilt",
                    help="計算モード (既定: tilt). "
-                        "tilt=外軸傾斜で 0..1g 全域, "
-                        "switching=Mode A+B 混合で 0..0.5g 傾斜なし, "
-                        "both=両方を並べて表示")
+                        "tilt=サンプル=軸交点, 外軸傾斜で 0..1g 沈殿なし; "
+                        "centrifuge=サンプル=4角 (r=8.5cm), 内側遠心で g_target、沈殿あり; "
+                        "switching=軸交点+1:1/黄金比切替で 0..0.5g 傾斜なし; "
+                        "all=3モード並べて表示")
     p.add_argument("--all", action="store_true", help="代表プリセットを一括表示")
     p.add_argument("--base-rpm", type=float, default=DEFAULT_BASE_RPM,
-                   help=f"基準回転速度 [RPM] (既定: {DEFAULT_BASE_RPM})")
+                   help=f"基準回転速度 [RPM] (既定: {DEFAULT_BASE_RPM}; "
+                        "centrifuge モードでは外側速度として使用)")
     p.add_argument("--drift-min", type=float, default=DEFAULT_DRIFT_MIN,
-                   help=f"位相ドリフト周期 [min] (既定: {DEFAULT_DRIFT_MIN})")
+                   help=f"位相ドリフト周期 [min] (既定: {DEFAULT_DRIFT_MIN}, "
+                        "tilt/switching モードのみ)")
     p.add_argument("--cycle-min", type=float, default=DEFAULT_CYCLE_MIN,
                    help=f"switching モード時の切替周期 [min] (既定: {DEFAULT_CYCLE_MIN})")
     p.add_argument("--chamber-mm", type=float, default=R_CHAMBER_DEFAULT * 1000,
                    help=f"チャンバ半径 [mm] (既定: {R_CHAMBER_DEFAULT*1000:.1f})")
+    p.add_argument("--sample-r-cm", type=float, default=R_INNER_FRAME * 100,
+                   help=f"centrifuge モード: サンプル位置の内軸からの半径 [cm] "
+                        f"(既定: {R_INNER_FRAME*100:.1f} = 内側フレーム4角)")
+    p.add_argument("--culture-hours", type=float, default=24.0,
+                   help="centrifuge モードの沈降診断で使う培養時間 [h] (既定: 24)")
     p.add_argument("--no-color", action="store_true", help="ANSIカラー無効")
     args = p.parse_args(argv)
 
     use_color = not args.no_color and sys.stdout.isatty()
     kw = dict(base_rpm=args.base_rpm, drift_min=args.drift_min,
-              cycle_min=args.cycle_min, chamber_r=args.chamber_mm / 1000.0)
+              cycle_min=args.cycle_min, chamber_r=args.chamber_mm / 1000.0,
+              sample_r=args.sample_r_cm / 100.0, culture_hours=args.culture_hours)
 
     def emit(g, label=""):
-        if args.mode == "both":
-            try:
-                render(compute(g, "tilt", **kw), label=label, use_color=use_color)
-                print()
-            except ValueError as e:
-                print(c(f"[tilt] {e}", "red", use_color=use_color))
-            try:
-                render(compute(g, "switching", **kw), label=label, use_color=use_color)
-                print()
-            except ValueError as e:
-                print(c(f"[switching] {e}", "red", use_color=use_color))
-                print()
-        else:
-            render(compute(g, args.mode, **kw), label=label, use_color=use_color)
-            print()
+        if args.mode == "all":
+            for m in ("tilt", "centrifuge", "switching"):
+                try:
+                    render(compute(g, m, **kw), label=label, use_color=use_color)
+                    print()
+                except ValueError as e:
+                    print(c(f"[{m}] {e}", "red", use_color=use_color))
+                    print()
+            return
+        render(compute(g, args.mode, **kw), label=label, use_color=use_color)
+        print()
 
     if args.all:
         print_header(use_color=use_color)
@@ -407,8 +558,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.gravity is None:
-        if args.mode == "both":
-            print(c("対話モードでは --mode tilt または switching を選択してください",
+        if args.mode == "all":
+            print(c("対話モードでは --mode tilt / centrifuge / switching のいずれかを選択してください",
                     "red", use_color=use_color), file=sys.stderr)
             return 1
         repl(mode=args.mode, use_color=use_color, **kw)
