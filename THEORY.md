@@ -88,7 +88,7 @@
 
 外側軸を実験室の床に対して垂直 (=床と直角に立てる) から、徐々に倒していくことを考えます。倒し具合を「傾斜角」と呼び、ψ (ギリシャ文字のプサイ) で表記します。
 
-https://raw.githubusercontent.com/GYRAVEC/clinostat-calc/main/image/Gemini_Generated_Image_gpu3i4gpu3i4gpu3.png
+![傾斜モードの幾何学](https://raw.githubusercontent.com/GYRAVEC/clinostat-calc/main/image/Gemini_Generated_Image_gpu3i4gpu3i4gpu3.png)
 
 地球重力は常に下を向いていますが、外側軸の向きが変わると、重力を「軸方向の成分」と「軸に直角な成分」に分けて考えたとき、それぞれの大きさが変わります。
 
